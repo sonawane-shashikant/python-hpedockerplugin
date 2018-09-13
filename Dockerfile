@@ -3,11 +3,16 @@ FROM alpine:edge
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONPATH=${HOME}/python-hpedockerplugin:/root/python-hpedockerplugin
 
+RUN apk add --no-cache python3 && \
+    python3 -m ensurepip && \
+    rm -r /usr/lib/python*/ensurepip && \
+    pip3 install --upgrade pip setuptools && \
+    if [ ! -e /usr/bin/pip ]; then ln -s pip3 /usr/bin/pip ; fi && \
+    if [[ ! -e /usr/bin/python ]]; then ln -sf /usr/bin/python3 /usr/bin/python; fi && \
+    rm -r /root/.cache
 
 RUN apk add --no-cache --update \
-    py-pip \
     py-setuptools \
-    python \
     sysfsutils \
     multipath-tools \
     device-mapper \
@@ -35,16 +40,14 @@ RUN apk add --virtual /tmp/.temp --no-cache --update \
     libffi-dev \
     linux-headers \
     make \
-    openssl \
+    libssl1.0 \
 	openssh-client \
 	openssl-dev \
-    python-dev \
-
+    python3-dev \
 
 # build and install hpedockerplugin
  && cd /python-hpedockerplugin \
- && pip install --upgrade . \
- && python setup.py install \
+ && python3 setup.py install \
 
 # apk Cleanups
  && apk del /tmp/.temp \
@@ -63,6 +66,14 @@ RUN chmod 0600 /root/.ssh/known_hosts
 RUN mkdir -p /opt/hpe/data
 RUN chmod u+x /usr/bin/iscsiadm
 RUN chmod u+x /usr/bin/cleanup.sh
+
+# Patch the os_brick, twisted modules
+
+COPY ./patch_os_bricks/linuxscsi.py /usr/lib/python3.6/site-packages/os_brick-1.13.1-py3.6.egg/os_brick/initiator/linuxscsi.py
+COPY ./patch_os_bricks/rootwrap.py /usr/lib/python3.6/site-packages/os_brick-1.13.1-py3.6.egg/os_brick/privileged/rootwrap.py
+COPY ./oslo/comm.py /usr/lib/python3.6/site-packages/oslo.privsep-1.29.0-py3.6.egg/oslo_privsep/comm.py
+COPY ./patch_os_bricks/compat.py /usr/lib/python3.6/site-packages/Twisted-18.7.0rc1-py3.6-linux-x86_64.egg/twisted/python/compat.py
+
 
 WORKDIR /python-hpedockerplugin
 ENTRYPOINT ["/bin/sh", "-c", "./plugin-start"]

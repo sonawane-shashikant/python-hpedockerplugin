@@ -1,14 +1,17 @@
 import logging
 import testtools
 
-import createvolume_tester
-import clonevolume_tester
-import createsnapshot_tester
-import getvolume_tester
-import mountvolume_tester
-import removesnapshot_tester
+import test.createvolume_tester as createvolume_tester
+import test.createreplicatedvolume_tester as createrepvolume_tester
+import test.clonevolume_tester as clonevolume_tester
+import test.createsnapshot_tester as createsnapshot_tester
+import test.fake_3par_data as data
+import test.getvolume_tester as getvolume_tester
+import test.mountvolume_tester as mountvolume_tester
+import test.removesnapshot_tester as removesnapshot_tester
+import test.removevolume_tester as removevolume_tester
 # import revertsnapshot_tester
-import unmountvolume_tester
+import test.unmountvolume_tester as unmountvolume_tester
 
 logger = logging.getLogger('hpedockerplugin')
 logger.level = logging.DEBUG
@@ -17,6 +20,11 @@ fh.setLevel(logging.DEBUG)
 fmt = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
 fh.setFormatter(fmt)
 logger.addHandler(fh)
+
+BKEND_3PAR_PP_REP = '3par_pp_rep'
+BKEND_3PAR_AP_SYNC_REP = '3par_ap_sync_rep'
+BKEND_3PAR_AP_ASYNC_REP = '3par_ap_async_rep'
+BKEND_3PAR_AP_STREAMING_REP = '3par_ap_streaming_rep'
 
 
 def tc_banner_decorator(func):
@@ -57,6 +65,16 @@ class HpeDockerUnitTestsBase(object):
     @tc_banner_decorator
     def test_create_dedup_volume(self):
         test = createvolume_tester.TestCreateDedupVolume()
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_import_volume(self):
+        test = createvolume_tester.TestImportVolume()
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_import_volume_with_other_option(self):
+        test = createvolume_tester.TestImportVolumeOtherOption()
         test.run_test(self)
 
     @tc_banner_decorator
@@ -119,6 +137,66 @@ class HpeDockerUnitTestsBase(object):
     @tc_banner_decorator
     def test_create_vol_set_flash_cache_fails(self):
         test = createvolume_tester.TestCreateVolSetFlashCacheFails()
+        test.run_test(self)
+
+    """
+    REPLICATION related tests
+    """
+    @tc_banner_decorator
+    def test_create_default_replicated_volume_fails(self):
+        test = createrepvolume_tester.TestCreateVolumeDefaultFails()
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_pp_replicated_volume_and_rcg(self):
+        test = createrepvolume_tester.TestCreateReplicatedVolumeAndRCG(
+            backend_name=BKEND_3PAR_PP_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_ap_sync_replicated_volume_and_rcg(self):
+        test = createrepvolume_tester.TestCreateReplicatedVolumeAndRCG(
+            backend_name=BKEND_3PAR_AP_SYNC_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_ap_async_replicated_volume_and_rcg(self):
+        test = createrepvolume_tester.TestCreateReplicatedVolumeAndRCG(
+            backend_name=BKEND_3PAR_AP_ASYNC_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_ap_streaming_replicated_volume_and_rcg(self):
+        test = createrepvolume_tester.TestCreateReplicatedVolumeAndRCG(
+            backend_name=BKEND_3PAR_AP_STREAMING_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_pp_replicated_volume_and_rcg_create_fails(self):
+        test = createrepvolume_tester.\
+            TestCreateReplicatedVolumeAndRCGCreateFails(
+                backend_name=BKEND_3PAR_PP_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_ap_sync_replicated_volume_and_rcg_create_fails(self):
+        test = createrepvolume_tester.\
+            TestCreateReplicatedVolumeAndRCGCreateFails(
+                backend_name=BKEND_3PAR_AP_SYNC_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_ap_async_replicated_volume_and_rcg_create_fails(self):
+        test = createrepvolume_tester.\
+            TestCreateReplicatedVolumeAndRCGCreateFails(
+                backend_name=BKEND_3PAR_AP_ASYNC_REP)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_create_ap_streaming_replicated_volume_and_rcg_create_fails(self):
+        test = createrepvolume_tester.\
+            TestCreateReplicatedVolumeAndRCGCreateFails(
+                backend_name=BKEND_3PAR_AP_STREAMING_REP)
         test.run_test(self)
 
     """
@@ -238,6 +316,44 @@ class HpeDockerUnitTestsBase(object):
 
     """
     REMOVE VOLUME related tests
+    """
+    @tc_banner_decorator
+    def test_remove_regular_volume(self):
+        rm_regular_vol = removevolume_tester.TestRemoveVolume.Regular()
+        test = removevolume_tester.TestRemoveVolume(rm_regular_vol)
+        test.run_test(self)
+
+    def test_remove_replicated_volume_role_primary(self):
+        params = {'role': data.ROLE_PRIMARY}
+        rm_rep_vol = removevolume_tester.TestRemoveVolume.ReplicatedVolume(
+            params)
+        test = removevolume_tester.TestRemoveVolume(rm_rep_vol)
+        test.run_test(self)
+
+    def test_remove_replicated_volume_role_secondary(self):
+        params = {'role': data.ROLE_SECONDARY}
+        rm_rep_vol = removevolume_tester.TestRemoveVolume.ReplicatedVolume(
+            params)
+        test = removevolume_tester.TestRemoveVolume(rm_rep_vol)
+        test.run_test(self)
+
+    def test_remove_last_replicated_volume(self):
+        params = {'role': data.ROLE_PRIMARY, 'rm_last_volume': True}
+        rm_rep_vol = removevolume_tester.TestRemoveVolume.ReplicatedVolume(
+            params)
+        test = removevolume_tester.TestRemoveVolume(rm_rep_vol)
+        test.run_test(self)
+
+    def test_remove_non_existent_volume(self):
+        test = removevolume_tester.TestRemoveNonExistentVolume()
+        test.run_test(self)
+
+    def test_remove_volume_with_child_snapshot(self):
+        test = removevolume_tester.TestRemoveVolumeWithChildSnapshot()
+        test.run_test(self)
+
+    """
+    REMOVE SNAPSHOT related tests
     """
     @tc_banner_decorator
     def test_remove_snapshot(self):

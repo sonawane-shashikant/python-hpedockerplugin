@@ -14,6 +14,7 @@
 
 import json
 import math
+import six
 import uuid
 
 from oslo_utils import importutils
@@ -37,64 +38,10 @@ MIN_CLIENT_VERSION = '4.0.0'
 DEDUP_API_VERSION = 30201120
 FLASH_CACHE_API_VERSION = 30201200
 COMPRESSION_API_VERSION = 30301215
+REMOTE_COPY_API_VERSION = 30202290
 TIME_OUT = 30
 
-hpe3par_opts = [
-    cfg.StrOpt('hpe3par_api_url',
-               default='',
-               help="3PAR WSAPI Server Url like "
-                    "https://<3par ip>:8080/api/v1",
-               deprecated_name='hp3par_api_url'),
-    cfg.StrOpt('hpe3par_username',
-               default='',
-               help="3PAR username with the 'edit' role",
-               deprecated_name='hp3par_username'),
-    cfg.StrOpt('hpe3par_password',
-               default='',
-               help="3PAR password for the user specified in hpe3par_username",
-               secret=True,
-               deprecated_name='hp3par_password'),
-    cfg.ListOpt('hpe3par_cpg',
-                default=["OpenStack"],
-                help="List of the CPG(s) to use for volume creation",
-                deprecated_name='hp3par_cpg'),
-    cfg.ListOpt('hpe3par_snapcpg',
-                default=[],
-                help="List of the CPG(s) to use for snapshot creation",
-                deprecated_name='hp3par_snapcpg'),
-    cfg.BoolOpt('hpe3par_debug',
-                default=False,
-                help="Enable HTTP debugging to 3PAR",
-                deprecated_name='hp3par_debug'),
-    cfg.ListOpt('hpe3par_iscsi_ips',
-                default=[],
-                help="List of target iSCSI addresses to use.",
-                deprecated_name='hp3par_iscsi_ips'),
-    cfg.BoolOpt('hpe3par_iscsi_chap_enabled',
-                default=False,
-                help="Enable CHAP authentication for iSCSI connections.",
-                deprecated_name='hp3par_iscsi_chap_enabled'),
-    cfg.BoolOpt('strict_ssh_host_key_policy',
-                default=False,
-                help='Option to enable strict host key checking.  When '
-                     'set to "True" the plugin will only connect to systems '
-                     'with a host key present in the configured '
-                     '"ssh_hosts_key_file".  When set to "False" the host key '
-                     'will be saved upon first connection and used for '
-                     'subsequent connections.  Default=False'),
-    cfg.StrOpt('ssh_hosts_key_file',
-               default='$state_path/ssh_known_hosts',
-               help='File containing SSH host keys for the systems with which '
-                    'the plugin needs to communicate.  OPTIONAL: '
-                    'Default=$state_path/ssh_known_hosts'),
-    cfg.BoolOpt('suppress_requests_ssl_warnings',
-                default=False,
-                help='Suppress requests library SSL certificate warnings.'),
-]
-
-
 CONF = cfg.CONF
-CONF.register_opts(hpe3par_opts)
 
 
 class HPE3PARCommon(object):
@@ -128,6 +75,15 @@ class HPE3PARCommon(object):
     CONVERT_TO_FULL = 2
     CONVERT_TO_DEDUP = 3
 
+    SYNC = 1
+    PERIODIC = 2
+    STREAMING = 4
+    DEFAULT_SYNC_PERIOD = 900
+    RCG_STARTED = 3
+    RCG_STOPPED = 5
+    ROLE_PRIMARY = 1
+    ROLE_SECONDARY = 2
+
     # License values for reported capabilities
     COMPRESSION_LIC = "Compression"
 
@@ -151,8 +107,10 @@ class HPE3PARCommon(object):
     hpe3par_valid_keys = ['cpg', 'snap_cpg', 'provisioning', 'persona', 'vvs',
                           'flash_cache']
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, host_config, src_bkend_config, tgt_bkend_config=None):
+        self._host_config = host_config
+        self.src_bkend_config = src_bkend_config
+        self.tgt_bkend_config = tgt_bkend_config
         self.client = None
         self.uuid = uuid.uuid4()
 
@@ -168,16 +126,18 @@ class HPE3PARCommon(object):
 
     def _create_client(self, timeout=TIME_OUT):
         try:
+            suppress_ssl_warnings = \
+                CONF.suppress_requests_ssl_warnings
             cl = client.HPE3ParClient(
-                self.config.hpe3par_api_url, timeout=timeout,
-                suppress_ssl_warnings=CONF.suppress_requests_ssl_warnings)
+                self.src_bkend_config.hpe3par_api_url, timeout=timeout,
+                suppress_ssl_warnings=suppress_ssl_warnings)
         except Exception as ex:
             msg = (_('Failed to connect to the array using %(url)s.'
                      'Please ensure the following \n'
                      '1.Value of IP and port specified for '
                      'hpe3par_api_url in hpe.conf is correct and \n'
                      '2. The array is reachable from the host.\n')
-                   % {'url': self.config.hpe3par_api_url})
+                   % {'url': self.src_bkend_config.hpe3par_api_url})
             LOG.error(msg)
             raise exception.ConnectionError(ex)
 
@@ -198,25 +158,25 @@ class HPE3PARCommon(object):
     def client_login(self):
         try:
             LOG.debug("Connecting to 3PAR")
-            self.client.login(self.config.hpe3par_username,
-                              self.config.hpe3par_password)
+            self.client.login(self.src_bkend_config.hpe3par_username,
+                              self.src_bkend_config.hpe3par_password)
         except hpeexceptions.HTTPUnauthorized as ex:
             msg = (_("Failed to Login to 3PAR (%(url)s) because %(err)s") %
-                   {'url': self.config.hpe3par_api_url, 'err': ex})
+                   {'url': self.src_bkend_config.hpe3par_api_url, 'err': ex})
             LOG.error(msg)
             raise exception.InvalidInput(reason=msg)
 
-        known_hosts_file = self.config.ssh_hosts_key_file
+        known_hosts_file = self._host_config.ssh_hosts_key_file
         policy = "AutoAddPolicy"
-        if CONF.strict_ssh_host_key_policy:
+        if self._host_config.strict_ssh_host_key_policy:
             policy = "RejectPolicy"
         self.client.setSSHOptions(
-            self.config.san_ip,
-            self.config.san_login,
-            self.config.san_password,
-            port=self.config.san_ssh_port,
-            conn_timeout=self.config.ssh_conn_timeout,
-            privatekey=self.config.san_private_key,
+            self.src_bkend_config.san_ip,
+            self.src_bkend_config.san_login,
+            self.src_bkend_config.san_password,
+            port=self.src_bkend_config.san_ssh_port,
+            conn_timeout=self.src_bkend_config.ssh_conn_timeout,
+            privatekey=self.src_bkend_config.san_private_key,
             missing_key_policy=policy,
             known_hosts_file=known_hosts_file)
 
@@ -237,7 +197,7 @@ class HPE3PARCommon(object):
         except hpeexceptions.UnsupportedVersion as ex:
             raise exception.InvalidInput(ex)
 
-        if self.config.hpe3par_debug:
+        if self.src_bkend_config.hpe3par_debug:
             self.client.debug_rest(True)
 
     def check_for_setup_error(self):
@@ -248,7 +208,7 @@ class HPE3PARCommon(object):
 
         self.client_login()
         try:
-            cpg_names = self.config.hpe3par_cpg
+            cpg_names = self.src_bkend_config.hpe3par_cpg
             for cpg_name in cpg_names:
                 self.validate_cpg(cpg_name)
 
@@ -353,6 +313,59 @@ class HPE3PARCommon(object):
             LOG.error(msg)
             raise exception.HPEDriverGetQosFromVvSetFailed(ex)
 
+    def get_vvset_detail(self, vvset):
+        return self.client.getVolumeSet(vvset)
+
+    def get_vvset_from_volume(self, volume):
+        vvset_name = self.client.findVolumeSet(volume)
+        if vvset_name is not None:
+            return self.client.getVolumeSet(vvset_name)
+        return None
+
+    def get_volume_detail(self, volume):
+        return self.client.getVolume(volume)
+
+    def manage_existing(self, volume, existing_ref_details, is_snap=False,
+                        target_vol_name=None, comment=None):
+
+        # check for volume/snap attachment, if attached raise error
+        existing_ref = existing_ref_details.get('name')
+        try:
+            self.client.getVLUN(existing_ref)
+        except hpeexceptions.HTTPNotFound:
+            # volume not attached so its good to manage
+            msg = (_("Volume: (%s) doesn't have vluns"
+                     " so can be manage.") % existing_ref)
+            LOG.info(msg)
+            pass
+        else:
+            msg = _("Managing volume %s failed because its attached.") %\
+                   (existing_ref)
+            LOG.error(msg)
+            raise exception.HPEDriverManageVolumeAttached(reason=msg)
+
+        if target_vol_name is None:
+            target_vol_name = utils.get_3par_name(volume['id'], is_snap)
+
+        if comment is None:
+            comment = {'volume_id': volume.get('id'),
+                       'name': volume.get('name'),
+                       'type': 'Docker',
+                       'display_name': volume.get('display_name')}
+            comment = json.dumps(comment)
+
+        new_vals = {'newName': target_vol_name, 'comment': comment}
+
+        if('userCPG' in existing_ref_details and
+           'snapCPG' not in existing_ref_details):
+            new_vals['snapCPG'] = existing_ref_details['userCPG']
+
+        self.client.modifyVolume(existing_ref, new_vals)
+
+        # we can get the latest 3par volume details now
+        volume_detail_3par = self.get_volume_detail(target_vol_name)
+        return volume_detail_3par
+
     def get_active_target_ports(self):
         ports = self.get_ports()
         target_ports = []
@@ -421,6 +434,75 @@ class HPE3PARCommon(object):
                               host['name'],
                               vlun_info['lun_id'],
                               nsp)
+
+    def check_response(self, resp):
+        for r in resp:
+            if 'Error' in r or 'Invalid' in r:
+                err_resp = r.strip()
+                return err_resp
+        return ""
+
+    def create_snap_schedule(self, src_vol_name, schedName, snapPrefix,
+                             exphrs, rethrs, schedFrequency):
+        expHr = str(exphrs)
+        retHr = str(rethrs)
+
+        cmd = ['createsched']
+        createsnapstring = []
+        createsnapstring.append('"createsv -f ')
+        if exphrs is not None:
+            createsnapstring.append('-exp ' + expHr + 'h ')
+        if rethrs is not None:
+            createsnapstring.append('-retain ' + retHr + 'h ')
+        snap_string = ".@y@@m@@d@@H@@M@@S@"
+        dynamic_snap_name = snapPrefix + snap_string
+        createsnapstring.append(dynamic_snap_name + ' ' + src_vol_name + '"')
+
+        snapstring = ''.join(createsnapstring)
+        schedFreq = '"' + schedFrequency + '"'
+
+        cmd.append(snapstring)
+        cmd.append(schedFreq)
+        cmd.append(schedName)
+        cmd.append('\r')
+        err_resp = ""
+        try:
+            LOG.info("Creating a snapshot schedule, command is %s..." % cmd)
+            resp = self.client._run(cmd)
+            LOG.info("Created a snapshot schedule - command is: %s..." % cmd)
+            LOG.info("Create schedule response is: %s..." % resp)
+
+            err_resp = self.check_response(resp)
+            if err_resp:
+                err = (_("Create snapschedule failed Error is"
+                         " '%(err_resp)s' ") %
+                       {'err_resp': err_resp})
+                LOG.error(err)
+                raise exception.HPEDriverCreateScheduleFailed(reason=err)
+        except hpeexceptions.SSHException as ex:
+            LOG.error("Failed to create snapshot schedule error is %s" % ex)
+            raise exception.HPEDriverCreateScheduleFailed(reason=ex)
+
+    def force_remove_3par_schedule(self, schedule_name):
+        cmd = ['removesched', '-f', '%s' % schedule_name, '\r']
+        err_resp = ""
+        try:
+            LOG.info("Removing a snapshot schedule, command is %s..." % cmd)
+            resp = self.client._run(cmd)
+            LOG.info("Removed a snapshot schedule - command is: %s..." % cmd)
+            LOG.info("Remove schedule response is: %s..." % resp)
+
+            err_resp = self.check_response(resp)
+            if err_resp:
+                err = (_("Removing snapschedule failed. Error is"
+                         " '%(err_resp)s' ") %
+                       {'err_resp': err_resp})
+                LOG.error(err)
+                raise exception.HPEDriverRemoveScheduleFailed(reason=err)
+        except hpeexceptions.SSHException as ex:
+            LOG.error("Failed to remove snapshot schedule error is %s" % ex)
+            raise exception.HPEDriverRemoveScheduleFailed(
+                reason=ex)
 
     def force_remove_volume_vlun(self, vol_name):
         # Assuming that a volume for a given host would have at most
@@ -584,6 +666,13 @@ class HPE3PARCommon(object):
                 hpe3par_keys[key] = value
         return hpe3par_keys
 
+    def get_snapcpg(self, volume, is_snap):
+        volume_name = utils.get_3par_name(volume['id'], is_snap)
+        vol = self.client.getVolume(volume_name)
+        if 'snapCPG' in vol:
+            return vol['snapCPG']
+        return None
+
     def get_cpg(self, volume, is_snap, allowSnap=False):
         volume_name = utils.get_3par_name(volume['id'], is_snap)
         vol = self.client.getVolume(volume_name)
@@ -592,7 +681,7 @@ class HPE3PARCommon(object):
         elif allowSnap and 'snapCPG' in vol:
             return vol['snapCPG']
         else:
-            return self.config.hpe3par_cpg[0]
+            return self.src_bkend_config.hpe3par_cpg[0]
         return None
 
     def _get_3par_vol_comment(self, volume_name):
@@ -619,7 +708,13 @@ class HPE3PARCommon(object):
             LOG.error(err)
             raise exception.InvalidInput(reason=err)
         else:
-            if compression_val.lower() == 'true':
+            if compression_val is None:
+                return None
+
+            # compression_val can be either boolean or string
+            # Explicit conversion to string is done to handle both types
+            compression_val_str = str(compression_val)
+            if compression_val_str.lower() == 'true':
                 if not compression_support:
                     msg = _('Compression is not supported on '
                             'underlying hardware')
@@ -635,7 +730,7 @@ class HPE3PARCommon(object):
 
         # TODO(leeantho): Choose the first CPG for now. In the future
         # support selecting different CPGs if multiple are provided.
-        cpg = self.config.hpe3par_cpg[0]
+        cpg = self.src_bkend_config.hpe3par_cpg[0]
         domain = self.get_domain(cpg)
         try:
             self.client.createVolumeSet(vvs_name, domain)
@@ -677,7 +772,12 @@ class HPE3PARCommon(object):
 
         # TODO(leeantho): Choose the first CPG for now. In the future
         # support selecting different CPGs if multiple are provided.
-        cpg = self.config.hpe3par_cpg[0]
+        if volume['cpg'] is not None:
+            cpg = volume['cpg']
+        else:
+            # cpg = self.src_bkend_config.hpe3par_cpg[0]
+            cpg = self.src_bkend_config.hpe3par_cpg[0]
+            volume['cpg'] = cpg
 
         # check for valid provisioning type
         prov_value = volume['provisioning']
@@ -715,10 +815,16 @@ class HPE3PARCommon(object):
         extras = {'comment': json.dumps(comments),
                   'tpvv': tpvv, }
 
-        if len(self.config.hpe3par_snapcpg):
-            extras['snapCPG'] = self.config.hpe3par_snapcpg[0]
+        if volume['snap_cpg'] is not None:
+            extras['snapCPG'] = volume['snap_cpg']
         else:
-            extras['snapCPG'] = cpg
+            if len(self.src_bkend_config.hpe3par_snapcpg):
+                snap_cpg = self.src_bkend_config.hpe3par_snapcpg[0]
+                extras['snapCPG'] = snap_cpg
+                volume['snap_cpg'] = snap_cpg
+            else:
+                extras['snapCPG'] = cpg
+                volume['snap_cpg'] = cpg
 
             # Only set the dedup option if the backend supports it.
         if self.API_VERSION >= DEDUP_API_VERSION:
@@ -777,6 +883,14 @@ class HPE3PARCommon(object):
 
     def delete_volume(self, volume, is_snapshot=False):
         try:
+            LOG.info("DELETE_VOLUME:%(volume)s", {'volume': volume})
+            if volume.get('rcg_info'):
+                # this is replicated volume
+                self._do_volume_replication_destroy(volume)
+                LOG.info("Deletion of replicated volume:%s successfull"
+                         % volume)
+                return
+
             if is_snapshot:
                 volume_name = utils.get_3par_snap_name(volume['id'])
             else:
@@ -839,6 +953,77 @@ class HPE3PARCommon(object):
         except Exception as ex:
             LOG.error(_LE("Exception: %s"), ex)
             raise exception.PluginException(ex)
+
+    def _do_volume_replication_destroy(self, volume):
+        rcg_info = volume.get('rcg_info')
+        rcg_name = rcg_info['local_rcg_name']
+        vol_name = utils.get_3par_name(volume['id'], None)
+        if rcg_name:
+            # TODO(sonivi): avoid volume deletion incase of failover
+            # avoid volume deletion incase of switchover
+            rcg_info = self.client.getRemoteCopyGroup(rcg_name)
+            if rcg_info.get('role') != self.ROLE_PRIMARY:
+                # it's not primary
+                msg = (_("Failed to delete volume: %(vol)s as rcg: %(rcg)s do"
+                         " not have valid role") % {
+                             'vol': vol_name, 'rcg': rcg_name})
+                LOG.error(msg)
+                raise exception.InvalidRcgRoleForDeleteVolume(reason=msg)
+
+            # stop remote copy
+            try:
+                LOG.info("Stopping RCG: %(rcg_name)s.", {'rcg_name': rcg_name})
+                self.client.stopRemoteCopy(rcg_name)
+                LOG.info("Succesfully stopped RCG: %(rcg_name)s.",
+                         {'rcg_name': rcg_name})
+            except Exception:
+                pass
+
+            # Remove volume from remote copy group
+            # 'removeFromTarget=True' will delete volume from secondary array
+            # TODO(sonivi): Handle 'removeFromTarget=False' also
+            try:
+                LOG.info("Removing vol:%(vol_name)s from RCG: %(rcg_name)s.",
+                         {'vol_name': vol_name, 'rcg_name': rcg_name})
+                self.client.removeVolumeFromRemoteCopyGroup(
+                    rcg_name, vol_name, removeFromTarget=True)
+                LOG.info("vol:%(vol_name)s succesfully removed from RCG: "
+                         "%(rcg_name)s.",
+                         {'vol_name': vol_name, 'rcg_name': rcg_name})
+            except Exception as ex:
+                LOG.error("%s" % six.iteritems(ex))
+                pass
+
+            # Delete volume
+            try:
+                LOG.info("Deleting volume:%(vol_name)s.",
+                         {'vol_name': vol_name})
+                self.client.deleteVolume(vol_name)
+                LOG.info("Succesfully deleted volume:%(vol_name)s.",
+                         {'vol_name': vol_name})
+            except Exception as ex:
+                msg = "Failed to delete volume: %s Error: %s" % (vol_name, ex)
+                LOG.error(_LE(msg))
+                raise exception.DeleteReplicatedVolumeFailed(reason=msg)
+
+            # check whether we should delete rcg or not ?
+            # it will be deleted if not volume is available in it
+            rcg_info = self.client.getRemoteCopyGroup(rcg_name)
+            LOG.info("Checking RCG Info:%(rcg_info)s.", {'rcg_info': rcg_info})
+            if len(rcg_info.get('volumes')) == 0:
+                # no volume is present so delete rcg also
+                LOG.info("Deleting RCG:%(rcg_info)s.", {'rcg_info': rcg_info})
+                self.client.removeRemoteCopyGroup(rcg_name)
+                LOG.info("Successfully deleted RCG:%(rcg_info)s.",
+                         {'rcg_info': rcg_info})
+            else:
+                # if other volumes are present, then start rcg
+                LOG.info("Other Volumes are present in RCG:%(rcg_info)s",
+                         {'rcg_info': rcg_info})
+                LOG.info("Starting RCG:%(rcg_name)s.", {'rcg_name': rcg_name})
+                self.client.startRemoteCopy(rcg_name)
+                LOG.info("Successfully started RCG:%(rcg_name)s.",
+                         {'rcg_name': rcg_name})
 
     def _get_3par_hostname_from_wwn_iqn(self, wwns, iqns):
         if wwns is not None and not isinstance(wwns, list):
@@ -966,7 +1151,10 @@ class HPE3PARCommon(object):
                 LOG.error(err)
                 raise exception.InvalidInput(reason=err)
             else:
-                if flash_cache.lower() == 'true':
+                # flash_cache can be either boolean or string
+                # Explicit conversion to string is done to handle both types
+                flash_cache_str = str(flash_cache)
+                if flash_cache_str.lower() == 'true':
                     return self.client.FLASH_CACHE_ENABLED
                 else:
                     return self.client.FLASH_CACHE_DISABLED
@@ -1078,9 +1266,9 @@ class HPE3PARCommon(object):
         except hpeexceptions.HTTPForbidden as ex:
             LOG.error("Exception: %s", ex)
             raise exception.NotAuthorized()
-        except hpeexceptions.HTTPNotFound as ex:
+        except Exception as ex:
             LOG.error("Exception: %s", ex)
-            raise exception.NotFound()
+            raise exception.PluginException(ex)
 
     def create_cloned_volume(self, dst_volume, src_vref):
         LOG.info("Create clone of volume\n%s", json.dumps(src_vref, indent=2))
@@ -1091,7 +1279,7 @@ class HPE3PARCommon(object):
             vol_chap_enabled = False
 
             # Check whether a volume is ISCSI and CHAP enabled on it.
-            if self.config.hpe3par_iscsi_chap_enabled:
+            if self.src_bkend_config.hpe3par_iscsi_chap_enabled:
                 try:
                     vol_chap_enabled = self.client.getVolumeMetaData(
                         src_3par_vol_name, 'HPQ-docker-CHAP-name')['value']
@@ -1108,11 +1296,10 @@ class HPE3PARCommon(object):
             if dst_volume['size'] == src_vref['size'] and not \
                     (vol_chap_enabled):
                 LOG.info("Creating a clone of volume, using online copy.")
-
-                cpg = self.config.hpe3par_cpg[0]
-                snap_cpg = cpg
-                if len(self.config.hpe3par_snapcpg):
-                    snap_cpg = self.config.hpe3par_snapcpg[0]
+                if 'cpg' in dst_volume:
+                    cpg = dst_volume['cpg']
+                if 'snap_cpg' in dst_volume:
+                    snap_cpg = dst_volume['snap_cpg']
 
                 # check for valid provisioning type
                 prov_value = src_vref['provisioning']
@@ -1125,7 +1312,10 @@ class HPE3PARCommon(object):
                 compression_val = src_vref['compression']  # None/true/False
                 compression = None
                 if compression_val is not None:
-                    compression = (compression_val.lower() == 'true')
+                    # compression_val can be either boolean or string
+                    # conversion to string is done to handle both types
+                    compression_val_str = str(compression_val)
+                    compression = (compression_val_str.lower() == 'true')
 
                 # make the 3PAR copy the contents.
                 # can't delete the original until the copy is done.
@@ -1174,8 +1364,6 @@ class HPE3PARCommon(object):
 
         except hpeexceptions.HTTPForbidden:
             raise exception.NotAuthorized()
-        except hpeexceptions.HTTPNotFound:
-            raise exception.NotFound()
         except Exception as ex:
             LOG.error("Exception: %s", ex)
             raise exception.PluginException(ex)
@@ -1222,15 +1410,181 @@ class HPE3PARCommon(object):
 
         return self._task_status
 
-    def get_snapshots_by_vol(self, vol_id):
+    def get_snapshots_by_vol(self, vol_id, snap_cpg):
         bkend_vol_name = utils.get_3par_vol_name(vol_id)
-        cpg_name = self.config.hpe3par_cpg[0]
-        if len(self.config.hpe3par_snapcpg):
-            cpg_name = self.config.hpe3par_snapcpg[0]
         LOG.debug("Querying snapshots for %s in %s cpg "
-                  % (bkend_vol_name, cpg_name))
-        return self.client.getSnapshotsOfVolume(cpg_name, bkend_vol_name)
+                  % (bkend_vol_name, snap_cpg))
+        return self.client.getSnapshotsOfVolume(snap_cpg, bkend_vol_name)
 
     def delete_vvset(self, id):
         vvset_name = utils.get_3par_vvs_name(id)
         self.client.deleteVolumeSet(vvset_name)
+
+    def get_rcg(self, rcg_name):
+        try:
+            rcg = self.client.getRemoteCopyGroup(rcg_name)
+            return rcg
+        except hpeexceptions.HTTPNotFound:
+            raise exception.HPEDriverRemoteCopyGroupNotFound(name=rcg_name)
+
+    def add_volume_to_rcg(self, **kwargs):
+        bkend_vol_name = kwargs['bkend_vol_name']
+        rcg_name = kwargs['rcg_name']
+
+        # Add volume to remote copy group.
+        rcg_targets = []
+        rcg_target = {'targetName': self.tgt_bkend_config.backend_id,
+                      'secVolumeName': bkend_vol_name}
+        rcg_targets.append(rcg_target)
+        optional = {'volumeAutoCreation': True}
+        try:
+            rcg = self.get_rcg(rcg_name)
+            original_rcg_state = rcg['targets'][0]['state']
+            if original_rcg_state == self.RCG_STARTED:
+                LOG.info("Stopping remote copy group: %s..." % rcg_name)
+                self.client.stopRemoteCopy(rcg_name)
+                LOG.info("Remote copy group stopped: %s" % rcg_name)
+            else:
+                LOG.info("Remote copy group %s was in stopped state. However"
+                         "after adding volume to it, it will be started"
+                         % rcg_name)
+            self.client.addVolumeToRemoteCopyGroup(rcg_name, bkend_vol_name,
+                                                   rcg_targets,
+                                                   optional=optional)
+            LOG.info("Starting remote copy group: %s..." % rcg_name)
+            self.client.startRemoteCopy(rcg_name)
+            LOG.info("Remote copy group started: %s" % rcg_name)
+        except Exception as ex:
+            msg = (_("Error occurred while adding volume '%s' to the remote "
+                     "copy group '%s': %s") % (bkend_vol_name, rcg_name,
+                                               six.text_type(ex)))
+            LOG.error(msg)
+            raise exception.VolumeBackendAPIException(data=msg)
+
+    def remove_volume_from_rcg(self, **kwargs):
+        bkend_vol_name = kwargs['bkend_vol_name']
+        rcg_name = kwargs['rcg_name']
+        try:
+            self.client.removeVolumeFromRemoteCopyGroup(rcg_name,
+                                                        bkend_vol_name)
+        except Exception as ex:
+            msg = (_("Error occurred while removing volume '%s' from the "
+                     "remote copy group '%s': %s") %
+                   (bkend_vol_name, rcg_name, six.text_type(ex)))
+            LOG.error(msg)
+            raise exception.VolumeBackendAPIException(data=msg)
+
+    def _get_backend_replication_mode(self, mode):
+        mode_map = {
+            'synchronous': self.SYNC,
+            'asynchronous': self.PERIODIC,
+            'streaming': self.STREAMING}
+        ret_mode = mode_map.get(mode)
+        return ret_mode
+
+    def create_rcg(self, **kwargs):
+        rcg_name = kwargs['rcg_name']
+        LOG.info("Creating RCG %s..." % rcg_name)
+        src_config = self.src_bkend_config
+        tgt_config = self.tgt_bkend_config
+        bkend_replication_mode = self._get_backend_replication_mode(
+            src_config.replication_mode)
+
+        cpg = tgt_config.hpe3par_cpg
+        if isinstance(cpg, list):
+            cpg = cpg[0]
+
+        snap_cpg = tgt_config.hpe3par_snapcpg
+        if isinstance(snap_cpg, list):
+            snap_cpg = snap_cpg[0]
+        rcg_target = {'targetName': tgt_config.backend_id,
+                      'mode': bkend_replication_mode,
+                      'snapCPG': snap_cpg,
+                      'userCPG': cpg}
+        rcg_targets = [rcg_target]
+
+        src_cpg = src_config.hpe3par_cpg
+        if isinstance(src_cpg, list):
+            src_cpg = src_cpg[0]
+
+        src_snap_cpg = src_config.hpe3par_snapcpg
+        if isinstance(src_snap_cpg, list):
+            src_snap_cpg = src_snap_cpg[0]
+
+        optional = {'localSnapCPG': src_snap_cpg,
+                    'localUserCPG': src_cpg}
+
+        domain = self.get_domain(src_cpg)
+        if domain:
+            optional['domain'] = domain
+        try:
+            LOG.info("Creating remote copy group: %s..." % rcg_name)
+            self.client.createRemoteCopyGroup(rcg_name, rcg_targets,
+                                              optional)
+            LOG.info("Remote copy group successfully created: %s!" % rcg_name)
+        except Exception as ex:
+            msg = "Error encountered while creating remote copy group: %s" %\
+                  six.text_type(ex)
+            LOG.error(msg)
+            raise exception.HPERemoteCopyGroupBackendAPIException(data=msg)
+
+        if tgt_config.quorum_witness_ip:
+            pp_params = {'targets': [
+                {'targetName': tgt_config.backend_id,
+                 'policies': {'autoFailover': True,
+                              'pathManagement': True,
+                              # TODO: Check if this is required
+                              'autoRecover': True}}]}
+            try:
+                self.client.modifyRemoteCopyGroup(rcg_name, pp_params)
+            except Exception as ex:
+                msg = "Error encountered while modifying remote copy group"\
+                      "%s: %s" % (rcg_name, six.text_type(ex))
+                LOG.error(msg)
+                raise exception.HPERemoteCopyGroupBackendAPIException(data=msg)
+
+        else:
+            if bkend_replication_mode == self.PERIODIC or \
+                    bkend_replication_mode == self.STREAMING:
+                if tgt_config.sync_period:
+                    sync_period = int(tgt_config.sync_period)
+                else:
+                    sync_period = self.DEFAULT_SYNC_PERIOD
+
+                sync_target = {'targetName': tgt_config.backend_id,
+                               'syncPeriod': sync_period}
+
+                opt = {'targets': [sync_target]}
+                try:
+                    self.client.modifyRemoteCopyGroup(rcg_name, opt)
+                except Exception as ex:
+                    msg = "Error encountered while setting the sync period "\
+                          "for the remote copy group: %s" % six.text_type(ex)
+                    LOG.error(msg)
+                    raise exception.HPERemoteCopyGroupBackendAPIException(
+                        data=msg)
+
+        try:
+            rcg = self.client.getRemoteCopyGroup(rcg_name)
+            ret_val = {'local_rcg_name': rcg_name,
+                       'remote_rcg_name': rcg['remoteGroupName']}
+            return ret_val
+
+        except Exception as ex:
+            msg = "Error encountered while fetching the remote copy "\
+                  "group after its creation: %s" % six.text_type(ex)
+            LOG.error(msg)
+            raise exception.HPERemoteCopyGroupBackendAPIException(data=msg)
+
+    def delete_rcg(self, **kwargs):
+        rcg_name = kwargs['rcg_name']
+        try:
+            LOG.info("Deleting remote copy group: %s..." % rcg_name)
+            self.client.removeRemoteCopyGroup(rcg_name)
+            LOG.info("Remote copy group deleted: %s!" % rcg_name)
+        except Exception as ex:
+            msg = (_("Error occurred while removing the "
+                     "remote copy group '%s': %s") %
+                   (rcg_name, six.text_type(ex)))
+            LOG.error(msg)
+            raise exception.HPERemoteCopyGroupBackendAPIException(data=msg)

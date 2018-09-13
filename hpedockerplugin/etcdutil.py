@@ -16,13 +16,17 @@ import etcd
 import json
 from oslo_log import log as logging
 import six
-from i18n import _, _LI
-import exception
+from hpedockerplugin.i18n import _, _LI
+import hpedockerplugin.exception as exception
 
 LOG = logging.getLogger(__name__)
 
 VOLUMEROOT = '/volumes'
+RCROOT = '/remote-copy'
+RC_KEY_FMT_STR = "%s/%s#%s"
+BACKENDROOT = '/backend'
 LOCKROOT = '/volumes-lock'
+RCG_LOCKROOT = '/rcg-lock'
 
 
 class EtcdUtil(object):
@@ -47,7 +51,7 @@ class EtcdUtil(object):
                                                              self.host))
 
         self.volumeroot = VOLUMEROOT + '/'
-        self.lockroot = LOCKROOT + '/'
+        self.backendroot = BACKENDROOT + '/'
         if client_cert is not None and client_key is not None:
             if len(host_tuple) > 0:
                 LOG.info('ETCDUTIL host tuple is not None')
@@ -76,6 +80,10 @@ class EtcdUtil(object):
             self.client.read(VOLUMEROOT)
         except etcd.EtcdKeyNotFound:
             self.client.write(VOLUMEROOT, None, dir=True)
+        try:
+            self.client.read(BACKENDROOT)
+        except etcd.EtcdKeyNotFound:
+            self.client.write(BACKENDROOT, None, dir=True)
         except Exception as ex:
             msg = (_('Could not init EtcUtil: %s'), six.text_type(ex))
             LOG.error(msg)
@@ -112,34 +120,12 @@ class EtcdUtil(object):
         self.client.delete(volkey)
         LOG.info(_LI('Deleted key: %s from etcd'), volkey)
 
-    def _get_vol_byuuid(self, voluuid):
-        volkey = self.volumeroot + voluuid
-        result = self.client.read(volkey)
-
-        volval = json.loads(result.value)
-        LOG.info(_LI('Read key: %s from etcd, result is: %s'), volkey, volval)
-        return volval
-
-    def try_lock_volname(self, volname):
-        try:
-            LOG.debug("Try locking volume %s", volname)
-            self.client.write(self.lockroot + volname, volname,
-                              prevExist=False)
-            LOG.debug("Volume is locked : %s", volname)
-        except Exception as ex:
-            msg = 'Volume: %(name)s is already locked' % {'name': volname}
-            LOG.exception(msg)
-            raise exception.HPEPluginLockFailed(obj=volname)
-
-    def try_unlock_volname(self, volname):
-        try:
-            LOG.debug("Try unlocking volume %s", volname)
-            self.client.delete(self.lockroot + volname)
-            LOG.debug("Volume is unlocked : %s", volname)
-        except Exception as ex:
-            msg = 'Volume: %(name)s unlock failed' % {'name': volname}
-            LOG.exception(msg)
-            raise exception.HPEPluginUnlockFailed(obj=volname)
+    def get_lock(self, lock_type):
+        # By default this is volume lock-root
+        lock_root = LOCKROOT
+        if lock_type == 'RCG':
+            lock_root = RCG_LOCKROOT
+        return EtcdLock(lock_root + '/', self.client)
 
     def get_vol_byname(self, volname):
         volumes = self.client.read(self.volumeroot, recursive=True)
@@ -179,3 +165,35 @@ class EtcdUtil(object):
             if 'path_info' in info and info['path_info'] is not None:
                 return json.loads(info['path_info'])
         return None
+
+    def get_backend_key(self, backend):
+        passphrase = self.backendroot + backend
+        result = self.client.read(passphrase)
+        return result.value
+
+
+class EtcdLock(object):
+    def __init__(self, lock_root, client):
+        self._lock_root = lock_root
+        self._client = client
+
+    def try_lock_name(self, name):
+        try:
+            LOG.debug("Try locking name %s", name)
+            self._client.write(self._lock_root + name, name,
+                               prevExist=False)
+            LOG.debug("Name is locked : %s", name)
+        except Exception as ex:
+            msg = 'Name: %(name)s is already locked' % {'name': name}
+            LOG.exception(msg)
+            raise exception.HPEPluginLockFailed(obj=name)
+
+    def try_unlock_name(self, name):
+        try:
+            LOG.debug("Try unlocking name %s", name)
+            self._client.delete(self._lock_root + name)
+            LOG.debug("Name is unlocked : %s", name)
+        except Exception as ex:
+            msg = 'Name: %(name)s unlock failed' % {'name': name}
+            LOG.exception(msg)
+            raise exception.HPEPluginUnlockFailed(obj=name)

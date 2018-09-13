@@ -1,7 +1,7 @@
 import copy
 
-import fake_3par_data as data
-import hpe_docker_unit_test as hpedockerunittest
+import test.fake_3par_data as data
+import test.hpe_docker_unit_test as hpedockerunittest
 from oslo_config import cfg
 CONF = cfg.CONF
 
@@ -14,7 +14,7 @@ class GetVolumeUnitTest(hpedockerunittest.HpeDockerUnitTestExecutor):
         mock_etcd = self.mock_objects['mock_etcd']
         mock_etcd.get_vol_byname.return_value = data.volume_with_snapshots
 
-    def override_configuration(self, config):
+    def override_configuration(self, all_configs):
         pass
 
 
@@ -23,7 +23,8 @@ class TestQosVolume(GetVolumeUnitTest):
         return {"Name": data.VOLUME_NAME,
                 "Opts": {"provisioning": "thin",
                          "qos-name": "vvk_vvset",
-                         "size": "2"}}
+                         "size": "2",
+                         "backend": "DEFAULT"}}
 
     def setup_mock_objects(self):
         mock_etcd = self.mock_objects['mock_etcd']
@@ -41,9 +42,9 @@ class TestQosVolume(GetVolumeUnitTest):
                     u'qos_detail': {
                         u'Latency': u'10 sec',
                         u'enabled': None,
-                        u'maxBWS': u'40 MB/sec',
+                        u'maxBWS': u'40.0 MB/sec',
                         u'maxIOPS': u'2000000 IOs/sec',
-                        u'minBWS': u'30 MB/sec',
+                        u'minBWS': u'30.0 MB/sec',
                         u'minIOPS': u'10000 IOs/sec',
                         u'priority': u'Normal',
                         u'vvset_name': u'vvk_vvset'
@@ -51,9 +52,13 @@ class TestQosVolume(GetVolumeUnitTest):
                     u'volume_detail': {
                         u'compression': None,
                         u'flash_cache': None,
+                        u'fsMode': None,
+                        u'fsOwner': None,
                         u'provisioning': u'thin',
                         u'size': 2,
-                        u'mountConflictDelay': data.MOUNT_CONFLICT_DELAY
+                        u'mountConflictDelay': data.MOUNT_CONFLICT_DELAY,
+                        u'cpg': data.HPE3PAR_CPG,
+                        u'snap_cpg': data.HPE3PAR_CPG2
                     }
                 },
                 u'Name': u'volume-d03338a9-9115-48a3-8dfc-35cdfcdc15a7',
@@ -93,7 +98,11 @@ class TestCloneVolume(GetVolumeUnitTest):
                         u'flash_cache': None,
                         u'provisioning': u'dedup',
                         u'size': 2,
-                        u'mountConflictDelay': data.MOUNT_CONFLICT_DELAY
+                        u'fsMode': None,
+                        u'fsOwner': None,
+                        u'mountConflictDelay': data.MOUNT_CONFLICT_DELAY,
+                        u'cpg': data.HPE3PAR_CPG,
+                        u'snap_cpg': data.HPE3PAR_CPG
                     }
                 },
                 u'Name': u'volume-d03338a9-9115-48a3-8dfc-35cdfcdc15a7',
@@ -128,6 +137,7 @@ class TestSyncSnapshots(GetSnapshotUnitTest):
     def setup_mock_objects(self):
         mock_etcd = self.mock_objects['mock_etcd']
         mock_etcd.get_vol_byname.side_effect = [
+            None,
             self._snap1,
             self._vol_with_snaps,
             self._snap2,
@@ -147,8 +157,11 @@ class TestSyncSnapshots(GetSnapshotUnitTest):
             u'parent_volume': data.VOLUME_NAME,
             u'provisioning': None,
             u'size': 2,
+            u'fsOwner': None,
+            u'fsMode': None,
             u'expiration_hours': '10',
             u'retention_hours': '10',
+            u'snap_cpg': None,
             u'mountConflictDelay': data.MOUNT_CONFLICT_DELAY
         }
 

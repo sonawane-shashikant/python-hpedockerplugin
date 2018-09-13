@@ -1,8 +1,8 @@
 # import mock
 import copy
 
-import createvolume_tester as createvolume
-import fake_3par_data as data
+import test.createvolume_tester as createvolume
+import test.fake_3par_data as data
 from hpedockerplugin import exception as hpe_exc
 
 
@@ -24,8 +24,10 @@ class TestCreateSnapshotDefault(CreateSnapshotUnitTest):
     def setup_mock_objects(self):
         mock_etcd = self.mock_objects['mock_etcd']
         mock_etcd.get_vol_byname.side_effect = [
+            data.volume,
             None,
-            copy.deepcopy(data.volume)
+            copy.deepcopy(data.volume),
+            None
         ]
 
     def check_response(self, resp):
@@ -46,6 +48,7 @@ class TestCreateSnapshotWithExpiryRetentionTimes(CreateSnapshotUnitTest):
     def setup_mock_objects(self):
         mock_etcd = self.mock_objects['mock_etcd']
         mock_etcd.get_vol_byname.side_effect = [
+            data.volume,
             None,
             copy.deepcopy(data.volume)
         ]
@@ -115,6 +118,7 @@ class TestCreateSnapshotEtcdSaveFails(CreateSnapshotUnitTest):
     def setup_mock_objects(self):
         mock_etcd = self.mock_objects['mock_etcd']
         mock_etcd.get_vol_byname.side_effect = [
+            data.volume,
             None,
             copy.deepcopy(data.volume)
         ]

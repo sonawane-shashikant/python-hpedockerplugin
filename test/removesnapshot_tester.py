@@ -1,6 +1,6 @@
 import copy
-import fake_3par_data as data
-import hpe_docker_unit_test as hpedockerunittest
+import test.fake_3par_data as data
+import test.hpe_docker_unit_test as hpedockerunittest
 
 
 class RemoveSnapshotUnitTest(hpedockerunittest.HpeDockerUnitTestExecutor):
@@ -16,7 +16,7 @@ class RemoveSnapshotUnitTest(hpedockerunittest.HpeDockerUnitTestExecutor):
         pass
 
     # To be overridden by the derived class if needed
-    def override_configuration(self, config):
+    def override_configuration(self, all_configs):
         pass
 
 
@@ -89,7 +89,6 @@ class TestRemoveNonExistentSnapshot(RemoveSnapshotUnitTest):
         mock_etcd.get_vol_byname.return_value = None
 
     def check_response(self, resp):
-        # expected = {u'Err': u'snapshot %s does not exist!'
-        #             % self.snapshot_name}
-        expected = {u'Err': u''}
+        msg = 'Volume name to remove not found: %s' % self.snapshot_name
+        expected = {u'Err': msg}
         self._test_case.assertEqual(expected, resp)

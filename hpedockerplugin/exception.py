@@ -31,7 +31,7 @@ import webob.exc
 from webob.util import status_generic_reasons
 from webob.util import status_reasons
 
-from i18n import _, _LE
+from hpedockerplugin.i18n import _, _LE
 
 
 LOG = logging.getLogger(__name__)
@@ -194,6 +194,20 @@ class HPEPluginUMountException(PluginException):
     message = _("HPE Docker Volume Plugin Unmount Failed: %(reason)s")
 
 
+class HPEPluginMapHourException(PluginException):
+    message = _("HPE Docker Volume Plugin Failed to map expiration hours:"
+                "%(reason)s")
+
+
+class HPEPluginMapSizeException(PluginException):
+    message = _("HPE Docker Volume Plugin Failed to map size: %(reason)s")
+
+
+class HPEPluginMapProvisioningException(PluginException):
+    message = _("HPE Docker Volume Plugin Failed to map provisioning:"
+                "%(reason)s")
+
+
 class HPEPluginMakeDirException(PluginException):
     message = _("HPE Docker Volume Plugin Makedir Failed: %(reason)s")
 
@@ -222,7 +236,11 @@ class HPEPluginLockFailed(HPEPluginEtcdException):
     message = _("ETCD lock failed: %(obj)s")
 
 
-class HPEPluginUnlockFailed(PluginException):
+class HPEPluginActiveDriverEntryNotFound(HPEPluginEtcdException):
+    message = _("ETCD active driver info not found: %(key)s")
+
+
+class HPEPluginUnlockFailed(HPEPluginEtcdException):
     message = _("ETCD unlock failed: %(obj)s")
 
 
@@ -231,7 +249,7 @@ class HPEDriverException(PluginException):
 
 
 class HPEDriverInvalidInput(HPEDriverException):
-    message = _("Invalid input received: %(reason)")
+    message = _("Invalid input received: %(reason)s")
 
 
 class HPEDriverInvalidSizeForCompressedVolume(HPEDriverException):
@@ -240,6 +258,11 @@ class HPEDriverInvalidSizeForCompressedVolume(HPEDriverException):
 
 class HPEDriverInvalidDedupVersion(HPEDriverException):
     message = _("Invalid input received: %(reason)s")
+
+
+class HPEDriverManageVolumeAttached(HPEDriverException):
+    message = _("Failed to manage volume/snapshot because its attached:"
+                "%(reason)s")
 
 
 class HPEDriverCreateVolumeWithQosFailed(HPEDriverException):
@@ -262,9 +285,51 @@ class HPEDriverAddVvToVvSetFailed(HPEDriverException):
     message = ""
 
 
+class HPEDriverCreateScheduleFailed(HPEDriverException):
+    message = _("Creation of snapshot schedule failed: %(reason)s")
+
+
+class HPEDriverRemoveScheduleFailed(HPEDriverException):
+    message = _("Removal of snapshot schedule failed: %(reason)s")
+
+
 class HPEDriverForceRemoveVLUNFailed(HPEDriverException):
     message = "Forced removal of VLUN failed: %(reason)"
 
 
 class HPEDriverNoVLUNsCreated(HPEDriverException):
     message = "No new VLUN(s) were created!"
+
+
+class HPEDriverRemoteCopyGroupNotFound(HPEDriverException):
+    message = "Remote copy group '%(name)s' not found"
+
+
+class HPEArrayNotReachable(PluginException):
+    message = "Array is not reachable: '%(url)s'"
+    # message = "Array is not reachable: '%(array_ip)'"
+
+
+class HPERemoteCopyGroupBackendAPIException(PluginException):
+    message = _("Bad or unexpected response from the RCG "
+                "backend API: %(data)s")
+
+
+class HPERemoteCopyGroupAlreadyExists(PluginException):
+    message = "Remote copy group %(rcg_name)s already exists"
+
+
+class HPERemoteCopyGroupNotPrimary(PluginException):
+    message = "Remote copy group '%(rcg_name)s' not in Primary role"
+
+
+class HPEDriverUnknownException(HPEDriverException):
+    message = "An unknown exception occurred: %(ex)s"
+
+
+class InvalidRcgRoleForDeleteVolume(PluginException):
+    message = _("Error: %(reason)s")
+
+
+class DeleteReplicatedVolumeFailed(PluginException):
+    message = _("Delete Replication Volume Failed: %(reason)s")

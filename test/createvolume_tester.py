@@ -1,7 +1,7 @@
 # import mock
-import fake_3par_data as data
+import test.fake_3par_data as data
 from hpedockerplugin import exception as hpe_exc
-import hpe_docker_unit_test as hpedockerunittest
+import test.hpe_docker_unit_test as hpedockerunittest
 from hpe3parclient import exceptions
 from oslo_config import cfg
 CONF = cfg.CONF
@@ -15,7 +15,7 @@ class CreateVolumeUnitTest(hpedockerunittest.HpeDockerUnitTestExecutor):
         mock_etcd = self.mock_objects['mock_etcd']
         mock_etcd.get_vol_byname.return_value = None
 
-    def override_configuration(self, config):
+    def override_configuration(self, all_configs):
         pass
 
     # TODO: check_response and setup_mock_objects can be implemented
@@ -35,6 +35,45 @@ class TestCreateVolumeDefault(CreateVolumeUnitTest):
     def get_request_params(self):
         return {"Name": "test-vol-001",
                 "Opts": {}}
+
+    def setup_mock_objects(self):
+        mock_etcd = self.mock_objects['mock_etcd']
+        mock_etcd.get_vol_byname.return_value = None
+
+
+class TestImportVolume(CreateVolumeUnitTest):
+    def check_response(self, resp):
+        self._test_case.assertEqual(resp, {u"Err": ''})
+
+        # Check if these functions were actually invoked
+        # in the flow or not
+        mock_3parclient = self.mock_objects['mock_3parclient']
+        mock_3parclient.getWsApiVersion.assert_called()
+        mock_3parclient.getVolume.assert_called()
+        mock_3parclient.getVLUN.assert_called()
+        mock_3parclient.modifyVolume.assert_called()
+
+    def get_request_params(self):
+        return {"Name": "abc_vol",
+                "Opts": {'importVol': "vvk_vol"}}
+
+    def setup_mock_objects(self):
+        mock_etcd = self.mock_objects['mock_etcd']
+        mock_etcd.get_vol_byname.return_value = None
+
+        mock_3parclient = self.mock_objects['mock_3parclient']
+        mock_3parclient.getVLUN.side_effect = \
+            [exceptions.HTTPNotFound('fake')]
+
+
+class TestImportVolumeOtherOption(CreateVolumeUnitTest):
+    def check_response(self, resp):
+        self._test_case.assertNotEqual(resp, {u"Err": ''})
+
+    def get_request_params(self):
+        return {"Name": "abc_vol",
+                "Opts": {"importVol": "vvk_vol",
+                         "size": "2"}}
 
     def setup_mock_objects(self):
         mock_etcd = self.mock_objects['mock_etcd']
@@ -162,9 +201,9 @@ class TestCreateVolumeWithInvalidQOS(CreateVolumeUnitTest):
 class TestCreateVolumeWithMutuallyExclusiveList(CreateVolumeUnitTest):
     def check_response(self, resp):
         self._test_case.assertEqual(
-            {"Err": "['virtualCopyOf', 'cloneOf', 'qos-name'] "
-                    "cannot be specified at the same time"},
-            resp)
+            {"Err": "['virtualCopyOf', 'cloneOf', 'qos-name',"
+                    " 'replicationGroup'] cannot be specified at the"
+                    " same time"}, resp)
 
     def get_request_params(self):
         return {"Name": "test-vol-001",
@@ -475,6 +514,7 @@ class TestCreateVolSetFlashCacheFails(CreateVolumeUnitTest):
         mock_3parclient.modifyVolumeSet.side_effect = [
             exceptions.HTTPInternalServerError("Internal server error")
         ]
+
 
 # More cases of flash cache
 # 1.
